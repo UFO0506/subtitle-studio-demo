@@ -4,7 +4,11 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const clock = (t) => { const s = Math.floor(t || 0); return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`; };
 const span = (sec) => (sec >= 60 ? `${Math.floor(sec / 60)} 分 ${Math.round(sec % 60)} 秒` : `${Math.round(sec)} 秒`);
 
-const ui = { base: "", data: null, tab: "subs", onlyChanged: true, mode: "final", term: null };
+const ui = {
+  base: "", example: null, data: null, media: null, view: "example", tab: "subs", onlyChanged: true, mode: "final", term: null,
+  gateway: "", status: null, file: null, fileSeconds: null, token: null, job: null, phase: "form", sent: 0, error: "", poll: null,
+};
+const JOB_KEY = "subtitle-demo-job";
 
 function noteHtml(text) {
   let html = "";
@@ -60,7 +64,7 @@ function subsTab(d) {
 function seeTab(d) {
   const rows = d.notes.map((n, i) => {
     const fixes = d.segments.filter((s) => s.changed && s.start < n.end && s.end > n.start);
-    const thumbs = n.thumbs.map((t) => `<button data-t="${t.t}" aria-label="跳到 ${clock(t.t)}"><img loading="lazy" src="${ui.base}/${t.src}" alt="${clock(t.t)} 的畫面"></button>`).join("");
+    const thumbs = n.thumbs.map((t) => `<button data-t="${t.t}" aria-label="跳到 ${clock(t.t)}"><img loading="lazy" src="${esc(t.url)}" alt="${clock(t.t)} 的畫面"></button>`).join("");
     const fixText = fixes.length
       ? `<div class="fixes"><b>這段時間改了 ${fixes.length} 句</b>${fixes.map((s) => `<div>${clock(s.start)}　${esc(s.whisper)} → ${esc(s.final)}</div>`).join("")}</div>`
       : "";
@@ -151,13 +155,14 @@ function renderPage() {
       <div class="left">
         <section class="panel">
           <video id="video" controls playsinline preload="metadata">
-            <source src="${ui.base}/source.mp4" type="video/mp4">
-            <track kind="subtitles" srclang="zh-Hant" label="AI 修正後" src="${ui.base}/final.vtt" default>
-            <track kind="subtitles" srclang="zh" label="Whisper 初稿" src="${ui.base}/whisper.vtt">
+            ${ui.media.video ? `<source src="${esc(ui.media.video)}">` : ""}
+            <track kind="subtitles" srclang="zh-Hant" label="AI 修正後" src="${esc(ui.media.final)}" default>
+            <track kind="subtitles" srclang="zh" label="Whisper 初稿" src="${esc(ui.media.whisper)}">
           </video>
           <div class="modes"><span class="label">影片字幕</span>
             <div class="seg"><button data-mode="final" aria-pressed="true">AI 修正後</button><button data-mode="whisper" aria-pressed="false">Whisper 初稿</button></div>
           </div>
+          ${ui.view === "mine" ? mineActions() : ""}
         </section>
         <section class="panel live" aria-label="AI 此刻的判斷">
           <h2>AI 此刻的判斷 <small id="live-time">00:00</small></h2>
@@ -174,10 +179,9 @@ function renderPage() {
       </section>
     </div>
     <footer class="panel">
-      <h2>關於這個展示版</h2>
+      <h2>${ui.view === "mine" ? "關於這個結果" : "關於這個範例"}</h2>
       <ul>
-        <li>這裡的字幕和紀錄都是完整服務實際跑出來的結果，沒有手動修改。</li>
-        <li>展示版不能上傳新影片。完整服務需要 GPU，跑在私人伺服器上，所以這裡展示預先跑好的範例。</li>
+        <li>這裡的字幕和紀錄都是字幕服務實際跑出來的結果，沒有手動修改。</li>
         <li>AI 可能出錯，例如畫面紀錄裡的錯字，所以字幕仍應由人確認。</li>
         ${d.credit ? `<li>範例影片：${esc(d.credit)}。</li>` : ""}
       </ul>
@@ -190,12 +194,311 @@ function renderPage() {
   renderTab();
 }
 
+// ---- 切換範例與自己的影片 ----
+
+function showExample() {
+  ui.view = "example";
+  ui.data = ui.example;
+  ui.media = { video: `${ui.base}/source.mp4`, final: `${ui.base}/final.vtt`, whisper: `${ui.base}/whisper.vtt` };
+  resetPlayerState();
+  renderViewTabs();
+  renderPage();
+}
+
+function resetPlayerState() {
+  ui.tab = "subs";
+  ui.onlyChanged = true;
+  ui.mode = "final";
+  ui.term = null;
+  lastSeg = -2;
+  lastWin = -2;
+}
+
+function renderViewTabs() {
+  document.querySelectorAll("[data-view]").forEach((b) => {
+    if (b.closest(".views")) b.setAttribute("aria-pressed", b.dataset.view === ui.view);
+  });
+}
+
+// ---- 用自己的影片 ----
+
+const plain = (t) => String(t || "").replace(/[，。、？！：；,.!?\s…\-「」]/g, "");
+const stamp = (t, comma) => {
+  const ms = Math.round((t % 1) * 1000) % 1000;
+  const s = Math.floor(t);
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${p(Math.floor(s / 3600))}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}${comma ? "," : "."}${p(ms, 3)}`;
+};
+const oneLine = (t) => String(t).replace(/\s*\n\s*/g, " ");
+const toVtt = (segs, key) => `WEBVTT\n\n${segs.map((s) => `${stamp(s.start)} --> ${stamp(s.end)}\n${oneLine(s[key])}\n`).join("\n")}`;
+const toSrt = (segs) => segs.map((s, i) => `${i + 1}\n${stamp(s.start, true)} --> ${stamp(s.end, true)}\n${oneLine(s.final)}\n`).join("\n");
+const textUrl = (text) => URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+
+function fromJob(job) {
+  const segments = job.segments.map((s) => ({ ...s, changed: plain(s.whisper) !== plain(s.final) }));
+  const notes = job.notes.map((n) => {
+    const len = n.end - n.start;
+    const thumbs = [0.125, 0.375, 0.625, 0.875].map((f) => {
+      const t = Math.round((n.start + len * f) * 10) / 10;
+      return { t, url: `${ui.gateway}/api/jobs/${ui.token}/thumb?t=${t}` };
+    });
+    return { ...n, thumbs };
+  });
+  return { ...job, title: job.title || (ui.file ? ui.file.name : "你的影片"), segments, notes };
+}
+
+function mineActions() {
+  const reselect = ui.media.video ? "" : `<p class="note" style="margin-top:8px">影片只在選取它的分頁裡播放。重新選取同一支影片就能對照字幕：</p><input type="file" id="reselect" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v">`;
+  return `<div class="modes"><span class="label">下載字幕</span><a class="btn" href="${esc(ui.media.final)}" download="subtitles.vtt">VTT</a><a class="btn" href="${esc(textUrl(toSrt(ui.data.segments)))}" download="subtitles.srt">SRT</a><button class="btn" data-new-video>換一支影片</button></div>${reselect}`;
+}
+
+function showResult(job) {
+  ui.data = fromJob(job);
+  ui.media = {
+    video: ui.file ? URL.createObjectURL(ui.file) : "",
+    final: textUrl(toVtt(ui.data.segments, "final")),
+    whisper: textUrl(toVtt(ui.data.segments, "whisper")),
+  };
+  resetPlayerState();
+  renderPage();
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(`${ui.gateway}${path}`, options);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "連線失敗，請稍後再試。");
+  return payload;
+}
+
+function renderMine() {
+  if (ui.phase === "working") { renderWorking(); return; }
+  if (ui.phase === "offline") {
+    app.innerHTML = `<section class="panel upload"><h2>字幕服務目前沒有開啟</h2><p class="note">完整處理需要作者的主機開著。你可以先看範例，或稍後再回來。</p><div class="actions"><button class="btn primary" data-view="example">看範例</button><button class="btn" data-retry>重新連線</button></div></section>`;
+    return;
+  }
+  const st = ui.status;
+  const full = st.remainingToday <= 0;
+  const note = full ? "今天的處理額度用完了，請明天再試。" : st.busy ? "目前有另一支影片正在處理，請稍後再試。" : `今天還能處理 ${st.remainingToday} 支。`;
+  app.innerHTML = `<section class="panel upload">
+    <h2>用你的影片試試看</h2>
+    <p class="note">${esc(note)}處理時間約為影片長度的 1～3 倍。</p>
+    <form id="upload-form">
+      <label for="file">影片（MP4 或 MOV，${Math.floor(st.maxSeconds / 60)} 分鐘以內，最大 1 GB）</label>
+      <input type="file" id="file" name="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" required>
+      <p class="note" id="file-info" role="status"></p>
+      <label for="context">影片說明與自訂名詞（選填，用來教 AI）</label>
+      <textarea id="context" name="context" rows="4" maxlength="2000" placeholder="例如：這是我的系上專題發表，說話的人有小明和阿凱。常講的詞：卷積、資料增強。"></textarea>
+      <label class="check"><input type="checkbox" name="think" checked> 審核時開啟思考（較準確、較慢）</label>
+      <label for="code">測試碼</label>
+      <input type="password" id="code" name="code" autocomplete="off" required>
+      <div class="warn"><strong>上傳前請注意</strong>
+        <ul>
+          <li>影片會傳到作者的私人伺服器處理，處理後會留在伺服器上，作者看得到。</li>
+          <li>請不要上傳機密、私人或你沒有權利使用的影片。</li>
+        </ul>
+        <label class="check"><input type="checkbox" name="agree" required> 我了解，也有權使用這支影片</label>
+      </div>
+      ${ui.error ? `<p class="err" role="alert">${esc(ui.error)}</p>` : ""}
+      <div class="actions"><button class="btn primary" type="submit" ${full || st.busy ? "disabled" : ""}>上傳並開始處理</button></div>
+    </form>
+  </section>`;
+}
+
+function renderWorking() {
+  const job = ui.job;
+  const total = ui.file ? ui.file.size : 0;
+  let title = "上傳中";
+  let detail = total ? `已傳 ${Math.round((ui.sent / total) * 100)}%，請不要關閉這個分頁。` : "";
+  let progress = total ? ui.sent / total : 0;
+  if (job) {
+    title = job.stage || "處理中";
+    detail = job.queue_position > 1 ? `前面還有 ${job.queue_position - 1} 個工作。` : job.detail || "";
+    progress = job.progress;
+  }
+  app.innerHTML = `<section class="panel upload" aria-live="polite"><h2>${esc(title)}</h2>
+    <div class="progress"><span style="width:${Math.round(progress * 100)}%"></span></div>
+    <p class="note">${esc(detail)}</p>
+    ${job ? `<p class="note">可以先離開，用同一個瀏覽器回到這裡就能看到結果。</p>` : ""}
+    ${job && job.log.length ? `<ol class="joblog">${job.log.slice(-6).map((l) => `<li>${esc(l.text)}</li>`).join("")}</ol>` : ""}
+  </section>`;
+}
+
+async function openMine() {
+  ui.view = "mine";
+  renderViewTabs();
+  stopPoll();
+  app.innerHTML = `<section class="panel upload"><p class="note">連線中…</p></section>`;
+  const hasJob = loadJobToken();
+  await refreshGateway();
+  if (hasJob) { startPolling(); return; }
+  ui.phase = "form";
+  try {
+    if (!ui.gateway) throw new Error("off");
+    ui.status = await api("/api/status");
+  } catch {
+    ui.phase = "offline";
+  }
+  if (ui.view === "mine") renderMine();
+}
+
+// 通道重開後網址會變，所以每次都讀最新的 config.json。
+async function refreshGateway() {
+  try {
+    const config = await (await fetch(`config.json?t=${Date.now()}`, { cache: "no-store" })).json();
+    ui.gateway = config.gateway || "";
+  } catch { /* 讀不到就沿用目前的位址 */ }
+}
+
+function loadJobToken() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(JOB_KEY) || "null");
+    if (saved && saved.token && saved.gateway) {
+      ui.token = saved.token;
+      ui.gateway = saved.gateway;
+      return true;
+    }
+  } catch { /* 瀏覽器不允許儲存時，就當作沒有進行中的工作 */ }
+  return false;
+}
+function saveJobToken() {
+  try { localStorage.setItem(JOB_KEY, JSON.stringify({ token: ui.token, gateway: ui.gateway })); } catch { /* 同上 */ }
+}
+function clearJobToken() {
+  try { localStorage.removeItem(JOB_KEY); } catch { /* 同上 */ }
+  ui.token = null;
+  ui.job = null;
+}
+function stopPoll() {
+  if (ui.poll) clearTimeout(ui.poll);
+  ui.poll = null;
+}
+
+async function startPolling() {
+  ui.phase = "working";
+  stopPoll();
+  try {
+    const job = await api(`/api/jobs/${ui.token}`);
+    ui.job = job;
+    if (ui.view !== "mine") return;
+    if (job.stage === "完成") { showResult(job); return; }
+    if (job.stage === "失敗") {
+      clearJobToken();
+      ui.error = "處理失敗，請換一支影片再試。";
+      await openMine();
+      return;
+    }
+    renderWorking();
+    ui.poll = setTimeout(startPolling, 4000);
+  } catch (error) {
+    if (ui.view !== "mine") return;
+    if (/不存在|過期/.test(error.message)) {
+      clearJobToken();
+      await openMine();
+      return;
+    }
+    // 通道重開後舊網址會失效；保留憑證，稍後再試。
+    app.innerHTML = `<section class="panel upload"><h2>暫時連不到字幕服務</h2><p class="note">你的工作沒有遺失，會自動重試。</p></section>`;
+    ui.poll = setTimeout(async () => { await refreshGateway(); startPolling(); }, 15000);
+  }
+}
+
+function checkFile(file) {
+  return new Promise((resolve) => {
+    const probe = document.createElement("video");
+    const url = URL.createObjectURL(file);
+    const done = (value) => { URL.revokeObjectURL(url); resolve(value); };
+    probe.preload = "metadata";
+    probe.onloadedmetadata = () => done(probe.duration);
+    probe.onerror = () => done(null);
+    probe.src = url;
+  });
+}
+
+async function onPick(input) {
+  const file = input.files[0];
+  const info = document.getElementById("file-info");
+  ui.file = file || null;
+  ui.fileSeconds = null;
+  if (!file) { info.textContent = ""; return; }
+  const seconds = await checkFile(file);
+  ui.fileSeconds = seconds;
+  if (seconds === null) info.textContent = "瀏覽器無法預覽這支影片，仍可以試著上傳；伺服器會再檢查格式和長度。";
+  else if (seconds > ui.status.maxSeconds) info.textContent = `這支影片有 ${clock(seconds)}，超過 10 分鐘，請換一支或先剪短。`;
+  else info.textContent = `影片長度 ${clock(seconds)}，大小 ${(file.size / 1048576).toFixed(1)} MB。`;
+}
+
+async function submitUpload(form) {
+  const file = ui.file;
+  const fail = (message) => { ui.error = message; ui.phase = "form"; renderMine(); };
+  if (!file) return;
+  if (file.size > ui.status.maxBytes) { ui.error = "影片不能超過 1 GB。"; renderMine(); return; }
+  if (ui.fileSeconds !== null && ui.fileSeconds > ui.status.maxSeconds) { ui.error = "影片不能超過 10 分鐘。"; renderMine(); return; }
+  const code = form.elements.code.value;
+  const context = form.elements.context.value;
+  const think = form.elements.think.checked;
+  ui.error = "";
+  ui.phase = "working";
+  ui.job = null;
+  ui.sent = 0;
+  renderWorking();
+  try {
+    const { uploadId } = await api("/api/uploads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Access-Code": code },
+      body: JSON.stringify({ size: file.size, context, think }),
+    });
+    const chunk = ui.status.chunkBytes;
+    for (let offset = 0; offset < file.size; offset += chunk) {
+      const part = file.slice(offset, offset + chunk);
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await api(`/api/uploads/${uploadId}?offset=${offset}`, { method: "PUT", body: part });
+          break;
+        } catch (error) {
+          if (attempt >= 3) throw error;
+        }
+      }
+      ui.sent = Math.min(file.size, offset + chunk);
+      renderWorking();
+    }
+    const { token } = await api(`/api/uploads/${uploadId}/finish`, { method: "POST" });
+    ui.token = token;
+    saveJobToken();
+    startPolling();
+  } catch (error) {
+    try { ui.status = await api("/api/status"); } catch { /* 保留舊狀態 */ }
+    fail(error.message);
+  }
+}
+
+document.addEventListener("change", (event) => {
+  if (event.target.id === "file") onPick(event.target);
+  if (event.target.id === "reselect" && event.target.files[0]) {
+    ui.file = event.target.files[0];
+    if (ui.job) showResult(ui.job);
+  }
+});
+
+document.addEventListener("submit", (event) => {
+  if (event.target.id !== "upload-form") return;
+  event.preventDefault();
+  submitUpload(event.target);
+});
+
 document.addEventListener("click", (event) => {
   const el = event.target.closest("button");
   if (!el) return;
   const d = el.dataset;
   const video = document.getElementById("video");
-  if (d.t !== undefined) {
+  if (d.view) {
+    if (d.view === "example") { stopPoll(); showExample(); } else openMine();
+  } else if ("retry" in d) {
+    openMine();
+  } else if ("newVideo" in d) {
+    clearJobToken();
+    ui.file = null;
+    openMine();
+  } else if (d.t !== undefined) {
     video.currentTime = +d.t;
     video.play().catch(() => {});
   } else if (d.tab) {
@@ -218,8 +521,10 @@ async function boot() {
     ui.base = `examples/${names[0]}`;
     const response = await fetch(`${ui.base}/result.json`);
     if (!response.ok) throw new Error("result");
-    ui.data = await response.json();
-    renderPage();
+    const example = await response.json();
+    example.notes.forEach((n) => n.thumbs.forEach((t) => { t.url = `${ui.base}/${t.src}`; }));
+    ui.example = example;
+    showExample();
   } catch {
     app.innerHTML = `<section class="panel"><h2>資料載入失敗</h2><p class="note">請重新整理一次。</p></section>`;
   }

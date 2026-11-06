@@ -4,7 +4,8 @@
 
 ## 技術
 - 純 HTML、CSS、JavaScript，不用框架或建置工具，部署到 GitHub Pages。
-- 頁面不呼叫任何後端，只讀 `examples/` 裡的靜態檔案。
+- 範例只讀 `examples/` 裡的靜態檔案；「用我的影片」透過 `tools/gateway.py` 這個關卡連到字幕服務，位址放在 `config.json`。
+- 網頁只能連關卡，不能直接連字幕服務。關卡的新路由要維持：測試碼、數量與長度上限、訪客只看得到自己的工作、回傳前濾掉內部資訊。
 - 本機預覽：`python -m http.server 8124`。
 
 ## 新增範例（不改網頁程式）
@@ -21,3 +22,4 @@
 ## 公開內容的限制
 - 這個 repo 是公開的。不放內網位址、伺服器路徑、金鑰、課程錄影或別人的私人影片。
 - 上傳前檢查 `result.json` 沒有內部路徑或位址。
+- 測試碼和字幕服務位址只放在本機的 `%LOCALAPPDATA%\subtitle-gateway\gateway.json`，不進版本庫。

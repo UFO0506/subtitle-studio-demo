@@ -289,8 +289,6 @@ function renderMine() {
       <label for="context">影片說明與自訂名詞（選填，用來教 AI）</label>
       <textarea id="context" name="context" rows="4" maxlength="2000" placeholder="例如：這是我的系上專題發表，說話的人有小明和阿凱。常講的詞：卷積、資料增強。"></textarea>
       <label class="check"><input type="checkbox" name="think" checked> 審核時開啟思考（較準確、較慢）</label>
-      <label for="code">測試碼</label>
-      <input type="password" id="code" name="code" autocomplete="off" required>
       <div class="warn"><strong>上傳前請注意</strong>
         <ul>
           <li>影片會傳到作者的私人伺服器處理，處理後會留在伺服器上，作者看得到。</li>
@@ -433,7 +431,6 @@ async function submitUpload(form) {
   if (!file) return;
   if (file.size > ui.status.maxBytes) { ui.error = "影片不能超過 1 GB。"; renderMine(); return; }
   if (ui.fileSeconds !== null && ui.fileSeconds > ui.status.maxSeconds) { ui.error = "影片不能超過 10 分鐘。"; renderMine(); return; }
-  const code = form.elements.code.value;
   const context = form.elements.context.value;
   const think = form.elements.think.checked;
   ui.error = "";
@@ -444,7 +441,7 @@ async function submitUpload(form) {
   try {
     const { uploadId } = await api("/api/uploads", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Access-Code": code },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ size: file.size, context, think }),
     });
     const chunk = ui.status.chunkBytes;

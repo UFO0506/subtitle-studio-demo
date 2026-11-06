@@ -1,15 +1,14 @@
 """字幕服務的對外關卡。
 
 字幕服務本身沒有登入機制，不能直接對外。這個程式只綁在本機，由通道連到外面，並且：
-- 上傳要測試碼；每天和同時處理的數量有上限；影片長度上限 10 分鐘。
+- 每天和同時處理的數量有上限；影片長度上限 10 分鐘。
 - 訪客只能用自己拿到的憑證查自己的工作，查不到工作清單、別人的影片或原始檔。
 - 回傳前只留展示需要的欄位，並濾掉可能含伺服器路徑的文字。
 
 設定檔放在資料夾 %LOCALAPPDATA%\\subtitle-gateway\\gateway.json，不進版本庫：
-{"upstream": "http://<內網位址>:<埠>", "code": "<測試碼>"}
+{"upstream": "http://<內網位址>:<埠>"}
 """
 import datetime
-import hmac
 import http.client
 import json
 import os
@@ -28,7 +27,6 @@ MAX_SECONDS = 600
 MAX_BYTES = 1024 * 1024 * 1024
 CHUNK_BYTES = 20 * 1024 * 1024
 DAILY_LIMIT = 10
-MAX_FAILS = 10
 JOB_DAYS = 7
 ACTIVE_HOURS = 3
 UPLOAD_IDLE_MINUTES = 20
@@ -39,14 +37,12 @@ PRIVATE_TEXT = re.compile(r"[A-Za-z]:\\|\\\\|/(nas|mnt|home|root|tmp|opt|srv|var
 DATA_DIR = Path(os.environ.get("SUBTITLE_GATEWAY_DIR") or Path(os.environ["LOCALAPPDATA"]) / "subtitle-gateway")
 CONFIG = json.loads((DATA_DIR / "gateway.json").read_text(encoding="utf8"))
 UPSTREAM = urllib.parse.urlsplit(CONFIG["upstream"])
-CODE = CONFIG["code"]
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
 lock = threading.Lock()
 uploads = {}
-fails = {}
 
 
 def load_state():
@@ -263,32 +259,11 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return self.rfile.read(length)
 
-    def client(self):
-        return self.headers.get("CF-Connecting-IP") or self.client_address[0]
-
-    def code_ok(self):
-        ip = self.client()
-        now = time.time()
-        with lock:
-            count, since = fails.get(ip, (0, now))
-            if now - since > 3600:
-                count, since = 0, now
-            if count >= MAX_FAILS:
-                fails[ip] = (count, since)
-                self.deny(429, "測試碼錯誤太多次，請一小時後再試。")
-                return False
-            if hmac.compare_digest(self.headers.get("X-Access-Code", "").encode("utf8"), CODE.encode("utf8")):
-                fails.pop(ip, None)
-                return True
-            fails[ip] = (count + 1, since)
-        self.deny(403, "測試碼不正確。")
-        return False
-
     def do_OPTIONS(self):
         self.send_response(204)
         self.cors()
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Access-Code")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -345,8 +320,6 @@ class Handler(BaseHTTPRequestHandler):
         self.deny(404, "找不到。")
 
     def start_upload(self):
-        if not self.code_ok():
-            return
         body = self.read_body(20000)
         try:
             info = json.loads(body or b"")

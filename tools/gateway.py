@@ -30,6 +30,7 @@ DAILY_LIMIT = 10
 JOB_DAYS = 7
 ACTIVE_HOURS = 3
 UPLOAD_IDLE_MINUTES = 20
+STALL_MINUTES = 30
 PORT = 8096
 ORIGINS = {"https://ufo0506.github.io", "http://localhost:8124"}
 PRIVATE_TEXT = re.compile(r"[A-Za-z]:\\|\\\\|/(nas|mnt|home|root|tmp|opt|srv|var|media|data)\b|\d+\.\d+\.\d+\.\d+", re.I)
@@ -43,6 +44,7 @@ STATE_FILE = DATA_DIR / "state.json"
 
 lock = threading.Lock()
 uploads = {}
+progress_seen = {}
 
 
 def load_state():
@@ -89,10 +91,23 @@ def active_busy():
         job = upstream_json(f"/api/jobs/{entry['job']}")
     except (OSError, ValueError):
         return True
-    if job.get("stage") in ("完成", "失敗"):
+    if job.get("stage") in ("完成", "失敗") or stalled(entry["job"], job):
         state["active"] = None
         return False
     return True
+
+
+def stalled(job_id, job):
+    """字幕服務沒有取消功能；工作太久沒進展時視為失敗，才不會讓網站一直顯示忙碌。"""
+    if job.get("stage") in ("完成", "失敗"):
+        return False
+    mark = (job.get("stage"), job.get("progress"), job.get("detail"), len(job.get("log") or []))
+    seen = progress_seen.get(job_id)
+    now = time.time()
+    if not seen or seen[0] != mark:
+        progress_seen[job_id] = (mark, now)
+        return False
+    return now - seen[1] > STALL_MINUTES * 60
 
 
 def clear_old():
@@ -304,7 +319,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(image)
                 return
-            self.reply(200, public_job(upstream_json(f"/api/jobs/{entry['job']}")))
+            job = upstream_json(f"/api/jobs/{entry['job']}")
+            with lock:
+                if stalled(entry["job"], job):
+                    job["stage"] = "失敗"
+            self.reply(200, public_job(job))
         except (OSError, ValueError):
             self.deny(502, "暫時連不到字幕服務，請稍後再試。")
 
